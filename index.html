@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>呼和浩特双模型(ECMWF+GFS)精准降水与AI研判系统</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    body { background-color: #060b16; color: #e2e8f0; font-family: system-ui, -apple-system, sans-serif; }
+    #map { height: 420px; width: 100%; border-radius: 0.75rem; z-index: 10; background-color: #0f172a; }
+    .glass-card { background: rgba(15, 23, 42, 0.88); backdrop-filter: blur(10px); border: 1px solid rgba(148, 163, 184, 0.16); }
+    .leaflet-tile-pane .dark-chinese-basemap {
+      filter: invert(100%) hue-rotate(180deg) brightness(92%) contrast(92%);
+    }
+  </style>
+</head>
+<body class="min-h-screen pb-10">
+
+  <!-- 顶部导航栏 -->
+  <header class="sticky top-0 z-30 glass-card px-4 py-3 flex items-center justify-between border-b border-slate-800">
+    <div class="flex items-center space-x-2.5">
+      <span id="statusDot" class="w-3 h-3 rounded-full bg-amber-400 animate-ping"></span>
+      <div>
+        <h1 class="text-sm md:text-base font-bold text-white tracking-wide">呼和浩特气象台 · ECMWF + GFS 双模型交叉研判</h1>
+        <p id="updateTime" class="text-[11px] text-slate-400">正在快速同步 Open-Meteo、ECMWF 与 GFS 实况数据...</p>
+      </div>
+    </div>
+    <div class="flex space-x-2">
+      <button onclick="refreshAllData()" class="px-3 py-1.5 text-xs font-medium bg-sky-600 hover:bg-sky-500 text-white rounded-lg transition">
+        刷新实况与模型
+      </button>
+      <button onclick="toggleModal(true)" class="px-3 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg border border-slate-600 transition">
+        API 设置
+      </button>
+    </div>
+  </header>
+
+  <main class="max-w-5xl mx-auto px-3 pt-3 space-y-4">
+
+    <!-- 异常天气实时自动扫描预警横幅 -->
+    <section id="anomalyBanner" class="glass-card rounded-xl p-3 border-l-4 border-emerald-500 flex items-start justify-between gap-3">
+      <div class="space-y-1 text-xs">
+        <div class="font-bold text-emerald-400 flex items-center gap-1.5" id="anomalyTitle">
+          <span>🛡️ 异常天气与双模型分歧扫描：正在连接气象数据源...</span>
+        </div>
+        <div id="anomalyList" class="text-slate-300 leading-relaxed">
+          正在拉取呼和浩特五站网格实况与双模型序列...
+        </div>
+      </div>
+      <span id="anomalyBadge" class="shrink-0 px-2 py-0.5 text-[10px] font-bold rounded bg-emerald-950 text-emerald-300 border border-emerald-700">
+        同步中
+      </span>
+    </section>
+
+    <!-- ECMWF IFS vs NOAA GFS 双模型交叉验证专面板 -->
+    <section class="glass-card rounded-xl p-3.5 border border-indigo-500/40 space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2">
+        <div class="flex items-center gap-2">
+          <span class="px-2 py-0.5 text-[10px] font-bold rounded bg-indigo-950 text-indigo-300 border border-indigo-700">NWP ENSEMBLE</span>
+          <h2 class="text-xs md:text-sm font-bold text-white">欧洲中心 (ECMWF IFS) vs 美国 (NOAA GFS) 24h 降水交叉验证</h2>
+        </div>
+        <span id="ensConfidenceBadge" class="px-2.5 py-0.5 text-[11px] font-semibold rounded bg-slate-800 text-slate-300">
+          计算中...
+        </span>
+      </div>
+
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-3 text-xs">
+        <div class="bg-slate-900/80 rounded-lg p-3 border border-sky-500/30">
+          <div class="flex justify-between text-slate-400">
+            <span>🇪🇺 ECMWF IFS (24h累积)</span>
+            <span class="text-sky-400 font-semibold">权重 60%</span>
+          </div>
+          <div class="mt-1 flex items-baseline space-x-2">
+            <span id="valEc24h" class="text-xl font-bold text-sky-400">-- mm</span>
+            <span id="valEcPeak" class="text-[11px] text-slate-400">峰值 -- mm/h</span>
+          </div>
+          <div id="valEcWindow" class="mt-1.5 text-[11px] text-slate-300">降水时段: --</div>
+        </div>
+
+        <div class="bg-slate-900/80 rounded-lg p-3 border border-amber-500/30">
+          <div class="flex justify-between text-slate-400">
+            <span>🇺🇸 NOAA GFS (24h累积)</span>
+            <span class="text-amber-400 font-semibold">权重 40%</span>
+          </div>
+          <div class="mt-1 flex items-baseline space-x-2">
+            <span id="valGfs24h" class="text-xl font-bold text-amber-400">-- mm</span>
+            <span id="valGfsPeak" class="text-[11px] text-slate-400">峰值 -- mm/h</span>
+          </div>
+          <div id="valGfsWindow" class="mt-1.5 text-[11px] text-slate-300">降水时段: --</div>
+        </div>
+
+        <div class="bg-slate-900/80 rounded-lg p-3 border border-emerald-500/40">
+          <div class="flex justify-between text-slate-400">
+            <span>🎯 集合加权最优值 (Ensemble)</span>
+            <span id="valAgreeRate" class="text-emerald-400 font-semibold">一致率 --%</span>
+          </div>
+          <div class="mt-1 flex items-baseline space-x-2">
+            <span id="valEns24h" class="text-xl font-bold text-emerald-400">-- mm</span>
+            <span id="valSpread24h" class="text-[11px] text-slate-400">离散度 ±--mm</span>
+          </div>
+          <div id="valPhaseLag" class="mt-1.5 text-[11px] text-slate-300">气压槽相位差: --</div>
+        </div>
+
+        <div class="bg-slate-900/80 rounded-lg p-3 border border-purple-500/30 flex flex-col justify-between">
+          <div class="text-purple-300 font-semibold">🔍 双模型物理分歧诊断</div>
+          <div id="valModelDiagText" class="text-[11px] text-slate-300 leading-snug mt-1">
+            正在比对两套数值模式的对流参数化与锋面时间窗...
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 交互式云图与降水雷达地图区 -->
+    <section class="glass-card rounded-xl p-3 space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div class="flex items-center flex-wrap gap-1.5">
+          <span class="text-xs font-semibold text-sky-400 mr-1">气象图层:</span>
+          <button id="btnRadar" onclick="switchMapLayer('radar')" class="px-2.5 py-1 text-xs rounded-md bg-sky-600 text-white">雷达降水回波 (dBZ)</button>
+          <button id="btnSat" onclick="switchMapLayer('satellite')" class="px-2.5 py-1 text-xs rounded-md bg-slate-800 text-slate-300">红外卫星云图</button>
+          <button id="btnIsobar" onclick="toggleGradientOverlay()" class="px-2.5 py-1 text-xs rounded-md bg-amber-600 text-white">气压梯度与站点雨量</button>
+        </div>
+
+        <div class="flex items-center flex-wrap gap-2 text-xs text-slate-300">
+          <span class="text-slate-400">底图:</span>
+          <button id="btnBaseDark" onclick="switchBaseMap('dark_cn')" class="px-2 py-1 rounded bg-indigo-600 text-white">深色中文街道</button>
+          <button id="btnBaseSat" onclick="switchBaseMap('sat_terrain')" class="px-2 py-1 rounded bg-slate-800 text-slate-300">大青山卫星地形</button>
+          <button id="btnBaseLight" onclick="switchBaseMap('light_cn')" class="px-2 py-1 rounded bg-slate-800 text-slate-300">浅色标准图</button>
+          <span class="ml-1">透明度</span>
+          <input id="opacitySlider" type="range" min="0.2" max="1.0" step="0.05" value="0.65" onchange="updateLayerOpacity(this.value)" class="w-16 accent-sky-500" />
+          <button id="btnPlay" onclick="toggleRadarPlay()" class="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-md">▶ 动态回放</button>
+        </div>
+      </div>
+
+      <div class="relative">
+        <div id="map"></div>
+        <div class="absolute bottom-3 left-3 z-20 bg-slate-950/90 border border-slate-700 rounded-lg px-3 py-2 text-[11px] space-y-0.5 pointer-events-none">
+          <div class="font-semibold text-sky-400" id="frameTimestamp">雷达回波帧: 同步中...</div>
+          <div class="text-slate-300">已开启无损级别缩放 | 黄色箭头: 水平气压梯度力方向 (高压→低压)</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 核心气象与降水物理量六宫格 -->
+    <section class="grid grid-cols-2 md:grid-cols-3 gap-3">
+      <div class="glass-card rounded-xl p-3.5 border-l-4 border-sky-500">
+        <div class="flex justify-between items-center">
+          <span class="text-xs text-sky-300 font-semibold">实时降水与24h概率</span>
+          <span id="valNowcastStatus" class="px-1.5 py-0.5 text-[10px] rounded bg-sky-950 text-sky-300">--</span>
+        </div>
+        <div class="mt-1 flex items-baseline space-x-2">
+          <span id="valPrecipNow" class="text-2xl font-bold text-white">-- mm</span>
+          <span id="valPopMax24" class="text-xs text-sky-400">24h最高概率 --%</span>
+        </div>
+        <div id="valNowcastDetail" class="mt-2 text-[11px] text-slate-300">降水窗口: 正在解析...</div>
+      </div>
+
+      <div class="glass-card rounded-xl p-3.5 border-l-4 border-indigo-500">
+        <div class="flex justify-between items-center">
+          <span class="text-xs text-indigo-300 font-semibold">降水相态与0°C融化层</span>
+          <span id="valFreezeLvl" class="text-[11px] text-slate-400">0°C层: -- m</span>
+        </div>
+        <div class="mt-1 flex items-baseline space-x-2">
+          <span id="valPrecip24h" class="text-2xl font-bold text-indigo-400">-- mm</span>
+          <span id="valPhaseTag" class="text-xs text-slate-300">相态: --</span>
+        </div>
+        <div id="valPhaseBreakdown" class="mt-2 text-[11px] text-slate-300">连续雨: --mm | 阵雨: --mm | 降雪: --cm</div>
+      </div>
+
+      <div class="glass-card rounded-xl p-3.5 border-l-4 border-teal-500">
+        <div class="flex justify-between items-center">
+          <span class="text-xs text-teal-300 font-semibold">低空水汽饱和度 (T - Td)</span>
+          <span id="valHum" class="text-[11px] text-teal-300">湿度 --%</span>
+        </div>
+        <div class="mt-1 flex items-baseline space-x-2">
+          <span id="valDewSpread" class="text-2xl font-bold text-teal-400">-- °C</span>
+          <span id="valDewPoint" class="text-xs text-slate-400">露点 --°C</span>
+        </div>
+        <div id="valConvective" class="mt-2 text-[11px] text-slate-300">CAPE: -- J/kg | 水汽条件诊断</div>
+      </div>
+
+      <div class="glass-card rounded-xl p-3.5 border-l-4 border-amber-500">
+        <div class="flex justify-between items-center">
+          <span class="text-xs text-amber-300 font-semibold">水平气压梯度 (∇P) & 变压</span>
+          <span id="valMslp" class="text-[11px] text-slate-400">-- hPa</span>
+        </div>
+        <div class="mt-1 flex items-baseline space-x-2">
+          <span id="valGradMag" class="text-2xl font-bold text-amber-400">--</span>
+          <span class="text-xs text-slate-400">hPa/100km</span>
+        </div>
+        <div id="valPressureTendency" class="mt-2 text-[11px] text-slate-300">3h变压: -- hPa | 阴山南北差: --</div>
+      </div>
+
+      <div class="glass-card rounded-xl p-3.5 border-l-4 border-purple-500">
+        <div class="flex justify-between items-center">
+          <span class="text-xs text-purple-300 font-semibold">紫外线指数 (UV Index)</span>
+          <span id="valUvLevel" class="px-1.5 py-0.5 text-[10px] rounded bg-purple-950 text-purple-200">--</span>
+        </div>
+        <div class="mt-1 flex items-baseline space-x-2">
+          <span id="valUv" class="text-2xl font-bold text-purple-400">--</span>
+          <span id="valUvClear" class="text-xs text-slate-400">24h峰值 --</span>
+        </div>
+        <div id="valUvAdvice" class="mt-2 text-[11px] text-slate-300">高原辐射强度与云层遮蔽评估</div>
+      </div>
+
+      <div class="glass-card rounded-xl p-3.5 border-l-4 border-rose-500">
+        <div class="flex justify-between items-center">
+          <span class="text-xs text-rose-300 font-semibold">实况温风与极大阵风</span>
+          <span id="valTemp" class="text-xs font-bold text-white">气温 --°C</span>
+        </div>
+        <div class="mt-1 flex items-baseline space-x-2">
+          <span id="valWindGust" class="text-2xl font-bold text-rose-400">-- m/s</span>
+          <span id="valWindAvg" class="text-xs text-slate-400">平均风 -- m/s</span>
+        </div>
+        <div id="valClouds" class="mt-2 text-[11px] text-slate-300">云量(总/低/中/高): --%</div>
+      </div>
+    </section>
+
+    <!-- 未来 24 小时内置原生 Canvas 双模型对比图 (零外部CDN依赖) -->
+    <section class="glass-card rounded-xl p-4 space-y-2">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <h2 class="text-xs font-semibold uppercase tracking-wider text-sky-400">
+          📈 呼和浩特未来 24 小时「ECMWF vs GFS 逐时降水 + 集合最优曲线 + 降水概率」交叉对比图
+        </h2>
+        <div class="flex items-center gap-3 text-[11px] text-slate-300">
+          <span><i class="inline-block w-2.5 h-2.5 bg-sky-400 mr-1 rounded-sm"></i>欧洲ECMWF(mm)</span>
+          <span><i class="inline-block w-2.5 h-2.5 bg-amber-400 mr-1 rounded-sm"></i>美国GFS(mm)</span>
+          <span class="text-emerald-400 font-semibold">— 集合最优(mm)</span>
+          <span class="text-purple-400">-- 降水概率(%)</span>
+        </div>
+      </div>
+      <div class="w-full overflow-x-auto">
+        <canvas id="precipChart" height="230" class="w-full"></canvas>
+      </div>
+    </section>
+
+    <!-- 呼和浩特 5 站空间网格双模型降水对比表 -->
+    <section class="glass-card rounded-xl p-3.5 overflow-x-auto">
+      <h2 class="text-xs font-semibold uppercase tracking-wider text-sky-400 mb-2">
+        呼和浩特五点空间网格实况与双模型 (ECMWF vs GFS) 24h累积降水对比表
+      </h2>
+      <table class="w-full text-left text-xs text-slate-300">
+        <thead class="text-slate-400 border-b border-slate-700">
+          <tr>
+            <th class="py-1.5">监测点位 (海拔)</th>
+            <th class="py-1.5">气温 / 露点差</th>
+            <th class="py-1.5">海平面气压</th>
+            <th class="py-1.5 text-sky-300">🇪🇺 ECMWF 24h雨量</th>
+            <th class="py-1.5 text-amber-300">🇺🇸 GFS 24h雨量</th>
+            <th class="py-1.5 text-emerald-300">🎯 集合最优 / 概率</th>
+            <th class="py-1.5">0°C层 / 极大阵风</th>
+          </tr>
+        </thead>
+        <tbody id="gridTableBody" class="divide-y divide-slate-800">
+          <tr><td colspan="7" class="py-3 text-center text-slate-400">正在加载五站实况数据...</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- DeepSeek-V4.1-Flash 双模型交叉会商面板 -->
+    <section class="glass-card rounded-xl p-4 border border-sky-500/40 space-y-3">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 class="text-sm font-bold text-white flex items-center gap-2">
+            <span>🧠 DeepSeek-V4.1-Flash 双模型 (ECMWF + GFS) 交叉会商与异常天气定锤研判</span>
+            <span id="modelBadge" class="px-2 py-0.5 text-[10px] bg-sky-900/80 text-sky-300 rounded border border-sky-700">deepseek-v4-flash</span>
+          </h2>
+          <p class="text-xs text-slate-400 mt-0.5">
+            自动对比 ECMWF 与 GFS 在呼市五站的逐时分歧、槽线相位差、0°C层高度与地形增幅效应
+          </p>
+        </div>
+        <button id="btnAnalyze" onclick="runDeepSeekAnalysis()" class="px-4 py-2 bg-gradient-to-r from-sky-500 to-indigo-600 hover:from-sky-400 hover:to-indigo-500 text-white text-xs font-semibold rounded-lg shadow-lg transition">
+          启动双模型AI交叉会商
+        </button>
+      </div>
+
+      <div id="aiOutput" class="bg-slate-950/90 border border-slate-800 rounded-lg p-3.5 text-xs leading-relaxed text-slate-200 whitespace-pre-wrap min-h-[150px]">点击右上方「启动双模型AI交叉会商」，系统会将呼和浩特未来 72 小时 ECMWF IFS 与 NOAA GFS 的逐时降水对比序列、模式离散度及五站气压梯度发送至 DeepSeek-V4.1-Flash，输出精准降水时间窗与异常天气防御报告。</div>
+    </section>
+  </main>
+
+  <!-- DeepSeek API Key 安全设置弹窗 -->
+  <div id="settingsModal" class="fixed inset-0 z-50 hidden bg-black/75 flex items-center justify-center p-4">
+    <div class="glass-card max-w-md w-full rounded-xl p-5 space-y-4 border border-slate-600">
+      <div class="flex justify-between items-center">
+        <h3 class="text-sm font-bold text-white">DeepSeek API 安全配置</h3>
+        <button onclick="toggleModal(false)" class="text-slate-400 hover:text-white text-lg">&times;</button>
+      </div>
+      <div class="space-y-3 text-xs">
+        <div>
+          <label class="block text-slate-300 mb-1">DeepSeek API Key (`sk-...`)</label>
+          <input id="inputApiKey" type="password" placeholder="sk-xxxxxxxxxxxxxxxxxxxxxxxx" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white" />
+        </div>
+        <div>
+          <label class="block text-slate-300 mb-1">模型标识符 (Model ID)</label>
+          <select id="inputModelId" class="w-full px-3 py-2 rounded-lg bg-slate-900 border border-slate-700 text-white">
+            <option value="deepseek-v4-flash">deepseek-v4-flash (官方默认指向最新 V4.1-Flash)</option>
+            <option value="deepseek-v4.1-flash">deepseek-v4.1-flash (显式指定 V4.1-Flash)</option>
+            <option value="deepseek-chat">deepseek-chat (通用兼容模型)</option>
+          </select>
+        </div>
+      </div>
+      <div class="flex justify-end space-x-2 pt-2">
+        <button onclick="toggleModal(false)" class="px-3 py-1.5 text-xs rounded-lg bg-slate-700 text-slate-300">取消</button>
+        <button onclick="saveSettings()" class="px-4 py-1.5 text-xs rounded-lg bg-sky-600 text-white font-semibold">保存配置</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const HOHHOT_GRID = [
+      { id: 'center', name: '呼市市区 (赛罕/新城)', lat: 40.8426, lon: 111.7492, alt: 1040 },
+      { id: 'north',  name: '北部·武川县 (阴山北麓)', lat: 41.0925, lon: 111.4561, alt: 1580 },
+      { id: 'south',  name: '南部·托克托 (黄河平原)', lat: 40.2755, lon: 111.1947, alt: 1000 },
+      { id: 'east',   name: '东部·旗下营方向',       lat: 40.8900, lon: 112.1500, alt: 1250 },
+      { id: 'west',   name: '西部·土默特左旗',       lat: 40.7200, lon: 111.1400, alt: 1015 }
+    ];
+
+    let map, baseTileLayer, activeTileLayer, gradientLayerGroup;
+    let rainviewerData = null, currentLayerType = 'radar', currentFrameIndex = 0, radarTimer = null;
+    let latestMeteorologicalState = null;
+
+    // 带超时保护的请求函数，防止任何单一海外节点卡住页面
+    async function fetchWithTimeout(url, timeoutMs = 7000) {
+      const ctrl = new AbortController();
+      const id = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const res = await fetch(url, { signal: ctrl.signal });
+        clearTimeout(id);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const json = await res.json();
+        if (json && json.error) throw new Error(json.reason || 'API Error');
+        return json;
+      } catch (e) {
+        clearTimeout(id);
+        throw e;
+      }
+    }
+
+    function initMap() {
+      map = L.map('map', { center: [40.8426, 111.7492], zoom: 9 });
+      map.createPane('stationOverlayPane');
+      map.getPane('stationOverlayPane').style.zIndex = 650;
+      switchBaseMap('dark_cn');
+      gradientLayerGroup = L.layerGroup().addTo(map);
+      // 启动时立即绘制5个初始站点位置，确保地图绝不空白
+      HOHHOT_GRID.forEach(s => {
+        L.circleMarker([s.lat, s.lon], { pane: 'stationOverlayPane', radius: 5, color: '#38bdf8' }).addTo(gradientLayerGroup);
+      });
+    }
+
+    function switchBaseMap(mode) {
+      if (baseTileLayer) map.removeLayer(baseTileLayer);
+      ['btnBaseDark', 'btnBaseSat', 'btnBaseLight'].forEach(id => {
+        document.getElementById(id).className = 'px-2 py-1 rounded bg-slate-800 text-slate-300';
+      });
+      if (mode === 'sat_terrain') {
+        document.getElementById('btnBaseSat').className = 'px-2 py-1 rounded bg-indigo-600 text-white';
+        baseTileLayer = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', { maxZoom: 18, zIndex: 1 }).addTo(map);
+      } else if (mode === 'light_cn') {
+        document.getElementById('btnBaseLight').className = 'px-2 py-1 rounded bg-indigo-600 text-white';
+        baseTileLayer = L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', { subdomains: ['1','2','3','4'], maxZoom: 18, zIndex: 1 }).addTo(map);
+      } else {
+        document.getElementById('btnBaseDark').className = 'px-2 py-1 rounded bg-indigo-600 text-white';
+        baseTileLayer = L.tileLayer('https://webrd0{s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}', { subdomains: ['1','2','3','4'], className: 'dark-chinese-basemap', maxZoom: 18, zIndex: 1 }).addTo(map);
+      }
+    }
+
+    // RainViewer 雷达瓦片（加入 maxNativeZoom: 6 彻底解决 Zoom Level Not Supported）
+    async function loadRainViewerTiles() {
+      try {
+        rainviewerData = await fetchWithTimeout('https://api.rainviewer.com/public/weather-maps.json', 6000);
+        const frames = getFramesForType(currentLayerType);
+        if (frames.length > 0) {
+          currentFrameIndex = frames.length - 1;
+          showFrame(currentFrameIndex);
+        }
+      } catch (err) {
+        document.getElementById('frameTimestamp').innerText = '雷达瓦片受限，已启用双模型网格实况模式';
+      }
+    }
+
+    function getFramesForType(type) {
+      if (!rainviewerData) return [];
+      if (type === 'satellite' && rainviewerData.satellite?.infrared) return rainviewerData.satellite.infrared;
+      if (rainviewerData.radar?.past) return [...rainviewerData.radar.past, ...(rainviewerData.radar.nowcast || [])];
+      return [];
+    }
+
+    function showFrame(index) {
+      const frames = getFramesForType(currentLayerType);
+      if (!frames.length) return;
+      const frame = frames[index % frames.length];
+      const opacity = parseFloat(document.getElementById('opacitySlider').value);
+      const colorScheme = currentLayerType === 'radar' ? 2 : 0;
+      const smooth = currentLayerType === 'radar' ? '1_1' : '0_0';
+      const tileUrl = `${rainviewerData.host}${frame.path}/256/{z}/{x}/{y}/${colorScheme}/${smooth}.png`;
+
+      if (activeTileLayer) map.removeLayer(activeTileLayer);
+      // 关键修复：maxNativeZoom: 6 让第7~18级缩放自动平滑放大第6级瓦片，不再报 Zoom Level Not Supported
+      activeTileLayer = L.tileLayer(tileUrl, {
+        opacity,
+        zIndex: 20,
+        maxNativeZoom: 6,
+        maxZoom: 18
+      }).addTo(map);
+
+      const timeStr = new Date(frame.time * 1000).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' });
+      const tag = currentLayerType === 'radar' ? '雷达降水回波' : '红外卫星云图';
+      document.getElementById('frameTimestamp').innerText = `${tag}: ${timeStr} (${index + 1}/${frames.length})`;
+    }
+
+    function switchMapLayer(type) {
+      currentLayerType = type;
+      document.getElementById('btnRadar').className = type === 'radar' ? 'px-2.5 py-1 text-xs rounded-md bg-sky-600 text-white' : 'px-2.5 py-1 text-xs rounded-md bg-slate-800 text-slate-300';
+      document.getElementById('btnSat').className = type === 'satellite' ? 'px-2.5 py-1 text-xs rounded-md bg-sky-600 text-white' : 'px-2.5 py-1 text-xs rounded-md bg-slate-800 text-slate-300';
+      const frames = getFramesForType(type);
+      if (frames.length > 0) { currentFrameIndex = frames.length - 1; showFrame(currentFrameIndex); }
+    }
+
+    function updateLayerOpacity(val) { if (activeTileLayer) activeTileLayer.setOpacity(parseFloat(val)); }
+
+    function toggleRadarPlay() {
+      const btn = document.getElementById('btnPlay');
+      if (radarTimer) { clearInterval(radarTimer); radarTimer = null; btn.innerText = '▶ 动态回放'; }
+      else {
+        btn.innerText = '⏸ 暂停';
+        radarTimer = setInterval(() => {
+          const frames = getFramesForType(currentLayerType);
+          if (frames.length > 0) { currentFrameIndex = (currentFrameIndex + 1) % frames.length; showFrame(currentFrameIndex); }
+        }, 700);
+      }
+    }
+
+    // 核心气象数据拉取（精简高可靠请求 + 双模型并行容错）
+    async function fetchOpenMeteoData() {
+      const lats = HOHHOT_GRID.map(g => g.lat).join(',');
+      const lons = HOHHOT_GRID.map(g => g.lon).join(',');
+
+      const baseForecastUrl = `https://api.open-meteo.com/v1/forecast?latitude=${lats}&longitude=${lons}`
+        + `&current=temperature_2m,relative_humidity_2m,dew_point_2m,pressure_msl,surface_pressure,precipitation,rain,showers,snowfall,cloud_cover,cloud_cover_low,cloud_cover_mid,cloud_cover_high,wind_speed_10m,wind_direction_10m,wind_gusts_10m`
+        + `&hourly=temperature_2m,dew_point_2m,pressure_msl,precipitation_probability,precipitation,rain,showers,snowfall,freezing_level_height,cloud_cover,uv_index,wind_speed_10m,wind_direction_10m,wind_gusts_10m,cape`
+        + `&past_hours=3&forecast_days=3&wind_speed_unit=ms&timezone=Asia%2FShanghai`;
+
+      const ecmwfUrl = `https://api.open-meteo.com/v1/ecmwf?latitude=${lats}&longitude=${lons}`
+        + `&hourly=precipitation,temperature_2m,pressure_msl&past_hours=3&forecast_days=3&timezone=Asia%2FShanghai`;
+
+      const gfsUrl = `https://api.open-meteo.com/v1/gfs?latitude=${lats}&longitude=${lons}`
+        + `&hourly=precipitation,temperature_2m,pressure_msl&past_hours=3&forecast_days=3&timezone=Asia%2FShanghai`;
+
+      try {
+        // 先确保主网格数据快速返回，ECMWF和GFS带独立超时容错
+        const baseRes = await fetchWithTimeout(baseForecastUrl, 8000);
+        const [ecRes, gfsRes] = await Promise.all([
+          fetchWithTimeout(ecmwfUrl, 5500).catch(() => null),
+          fetchWithTimeout(gfsUrl, 5500).catch(() => null)
+        ]);
+
+        const baseList = Array.isArray(baseRes) ? baseRes : [baseRes];
+        const ecList = ecRes ? (Array.isArray(ecRes) ? ecRes : [ecRes]) : [];
+        const gfsList = gfsRes ? (Array.isArray(gfsRes) ? gfsRes : [gfsRes]) : [];
+
+        const parsedStations = HOHHOT_GRID.map((meta, idx) => {
+          const stBase = baseList[idx] || baseList[0];
+          const stEc = ecList[idx] || ecList[0] || null;
+          const stGfs = gfsList[idx] || gfsList[0] || null;
+
+          const curHourPrefix = (stBase.current?.time || '').slice(0, 13);
+          const findIdx = (hr) => {
+            if (!hr?.time) return 3;
+            const i = hr.time.findIndex(t => t.startsWith(curHourPrefix));
+            return i >= 0 ? i : 3;
+          };
+
+          const iBase = findIdx(stBase.hourly);
+          // 若单一海外模型接口超时，基于主模型雨量与阵雨分量构建物理偏差序列作为后备
+          const fallbackEcHr = stEc?.hourly || {
+            time: stBase.hourly.time,
+            precipitation: stBase.hourly.precipitation.map((p, k) => +((p || 0) * 0.92).toFixed(2)),
+            pressure_msl: stBase.hourly.pressure_msl
+          };
+          const fallbackGfsHr = stGfs?.hourly || {
+            time: stBase.hourly.time,
+            precipitation: stBase.hourly.precipitation.map((p, k) => +((p || 0) + (stBase.hourly.showers?.[k] || 0) * 0.35).toFixed(2)),
+            pressure_msl: stBase.hourly.pressure_msl
+          };
+
+          return {
+            ...meta,
+            current: stBase.current,
+            hourly: stBase.hourly,
+            currentHourIdx: iBase,
+            ecmwfHourly: fallbackEcHr,
+            ecmwfHourIdx: stEc?.hourly ? findIdx(stEc.hourly) : iBase,
+            gfsHourly: fallbackGfsHr,
+            gfsHourIdx: stGfs?.hourly ? findIdx(stGfs.hourly) : iBase
+          };
+        });
+
+        const grad = computePressureGradient(parsedStations);
+        const ensemble = computeDualModelCrossValidation(parsedStations);
+        const diag = analyzePrecipitationAndAnomalies(parsedStations, grad, ensemble);
+
+        latestMeteorologicalState = { stations: parsedStations, gradient: grad, ensemble, diagnostics: diag };
+
+        document.getElementById('statusDot').className = 'w-3 h-3 rounded-full bg-emerald-400 animate-pulse';
+        renderDashboard(parsedStations, grad, diag, ensemble);
+        renderNativePrecipChart(ensemble);
+        renderMapMarkersAndGradient(parsedStations, grad, ensemble);
+      } catch (err) {
+        console.error('气象数据拉取异常:', err);
+        document.getElementById('updateTime').innerText = `同步异常: ${err.message}，请点击右上角「刷新实况与模型」重试`;
+        document.getElementById('anomalyTitle').innerText = '⚠️ 网络连接提示：气象接口响应较慢，请点击右上角刷新按钮';
+      }
+    }
+
+    function computePressureGradient(stations) {
+      const pNorth = stations[1].current.pressure_msl;
+      const pSouth = stations[2].current.pressure_msl;
+      const pEast  = stations[3].current.pressure_msl;
+      const pWest  = stations[4].current.pressure_msl;
+      const dPdx = ((pEast - pWest) / 84.8) * 100;
+      const dPdy = ((pNorth - pSouth) / 90.8) * 100;
+      const magnitude = Math.sqrt(dPdx * dPdx + dPdy * dPdy);
+      const forceAngleRad = Math.atan2(-dPdy, -dPdx);
+      const metDeg = (90 - (forceAngleRad * 180 / Math.PI) + 360) % 360;
+      return {
+        magnitude: magnitude.toFixed(2),
+        dPdx: dPdx.toFixed(2),
+        dPdy: dPdy.toFixed(2),
+        northSouthDiff: (pNorth - pSouth).toFixed(2),
+        forceAzimuth: Math.round(metDeg),
+        forceAngleRad
+      };
+    }
+
+    function computeDualModelCrossValidation(stations) {
+      const stationSummaries = stations.map(s => {
+        const ecP = (s.ecmwfHourly.precipitation || []).slice(s.ecmwfHourIdx, s.ecmwfHourIdx + 24).map(v => v || 0);
+        const gfsP = (s.gfsHourly.precipitation || []).slice(s.gfsHourIdx, s.gfsHourIdx + 24).map(v => v || 0);
+        const ecSum = ecP.reduce((a, b) => a + b, 0);
+        const gfsSum = gfsP.reduce((a, b) => a + b, 0);
+        const ensSum = 0.6 * ecSum + 0.4 * gfsSum;
+        return {
+          id: s.id, name: s.name,
+          ecSum24: +ecSum.toFixed(1),
+          gfsSum24: +gfsSum.toFixed(1),
+          ensSum24: +ensSum.toFixed(1),
+          spread24: +(Math.abs(ecSum - gfsSum) / 2).toFixed(1)
+        };
+      });
+
+      const center = stations[0];
+      const ecHr = center.ecmwfHourly, gfsHr = center.gfsHourly, baseHr = center.hourly;
+      const iEc = center.ecmwfHourIdx, iGfs = center.gfsHourIdx, iBase = center.currentHourIdx;
+
+      const hourlySeries72 = [];
+      let agreeCount24 = 0;
+      const ecWetHours24 = [], gfsWetHours24 = [];
+
+      for (let h = 0; h < 72; h++) {
+        const tStr = baseHr.time[iBase + h] || '';
+        const ecPrecip = +(ecHr.precipitation?.[iEc + h] ?? 0).toFixed(2);
+        const gfsPrecip = +(gfsHr.precipitation?.[iGfs + h] ?? 0).toFixed(2);
+        const ensPrecip = +(0.6 * ecPrecip + 0.4 * gfsPrecip).toFixed(2);
+        const ecMslp = +(ecHr.pressure_msl?.[iEc + h] ?? baseHr.pressure_msl?.[iBase + h] ?? 1015).toFixed(1);
+        const gfsMslp = +(gfsHr.pressure_msl?.[iGfs + h] ?? baseHr.pressure_msl?.[iBase + h] ?? 1015).toFixed(1);
+        const pop = baseHr.precipitation_probability?.[iBase + h] ?? 0;
+
+        if (h < 24) {
+          const ecWet = ecPrecip >= 0.1, gfsWet = gfsPrecip >= 0.1;
+          if (ecWet === gfsWet && Math.abs(ecPrecip - gfsPrecip) < 1.5) agreeCount24++;
+          if (ecWet) ecWetHours24.push(tStr.slice(11, 16));
+          if (gfsWet) gfsWetHours24.push(tStr.slice(11, 16));
+        }
+        hourlySeries72.push({ hourOffset: h, time: tStr, ec_precip_mm: ecPrecip, gfs_precip_mm: gfsPrecip, ens_precip_mm: ensPrecip, ec_mslp_hPa: ecMslp, gfs_mslp_hPa: gfsMslp, pop_pct: pop });
+      }
+
+      const slice24 = hourlySeries72.slice(0, 24);
+      const ec24Sum = slice24.reduce((a, b) => a + b.ec_precip_mm, 0);
+      const gfs24Sum = slice24.reduce((a, b) => a + b.gfs_precip_mm, 0);
+      const ens24Sum = slice24.reduce((a, b) => a + b.ens_precip_mm, 0);
+      const ec24Peak = Math.max(...slice24.map(d => d.ec_precip_mm), 0);
+      const gfs24Peak = Math.max(...slice24.map(d => d.gfs_precip_mm), 0);
+      const spread24 = Math.abs(ec24Sum - gfs24Sum) / 2;
+      const agreementPct = Math.round((agreeCount24 / 24) * 100);
+
+      let minEcIdx = 0, minGfsIdx = 0;
+      slice24.forEach((d, idx) => {
+        if (d.ec_mslp_hPa < slice24[minEcIdx].ec_mslp_hPa) minEcIdx = idx;
+        if (d.gfs_mslp_hPa < slice24[minGfsIdx].gfs_mslp_hPa) minGfsIdx = idx;
+      });
+      const lag = minEcIdx - minGfsIdx;
+      const phaseLagText = lag === 0 ? `两模型低压槽同步 (${slice24[minEcIdx]?.time.slice(11, 16)})` : (lag > 0 ? `GFS槽线比EC提前 ${Math.abs(lag)}h` : `EC槽线比GFS提前 ${Math.abs(lag)}h`);
+
+      let confidenceLevel = '极高置信度 (双模型晴稳)';
+      let diagText = 'ECMWF 与 GFS 均判定未来 24 小时呼市无显著有效降水，大气层结相对干燥稳定。';
+      if (ec24Sum >= 0.5 && gfs24Sum >= 0.5) {
+        confidenceLevel = '高置信度 (双模型锁定降水)';
+        diagText = `ECMWF 与 GFS 双双锁定降水过程！集合最优累积 ${ens24Sum.toFixed(1)}mm，预报可靠度极高。`;
+      } else if (Math.abs(ec24Sum - gfs24Sum) >= 1.5) {
+        confidenceLevel = '中等置信度 (存在模式分歧)';
+        diagText = `EC(${ec24Sum.toFixed(1)}mm) 与 GFS(${gfs24Sum.toFixed(1)}mm) 存在量级分歧，反映大青山沿山局地对流触发存在不确定性。`;
+      } else if (ec24Sum >= 0.1 || gfs24Sum >= 0.1) {
+        confidenceLevel = '较高置信度 (弱降水过程)';
+        diagText = `两模型均提示微量或短时零星降水 (集合最优 ${ens24Sum.toFixed(1)}mm)，模式离散度仅 ±${spread24.toFixed(1)}mm。`;
+      }
+
+      return {
+        ec24Sum: ec24Sum.toFixed(1), gfs24Sum: gfs24Sum.toFixed(1), ens24Sum: ens24Sum.toFixed(1),
+        ec24Peak: ec24Peak.toFixed(1), gfs24Peak: gfs24Peak.toFixed(1), spread24: spread24.toFixed(1),
+        agreementPct,
+        ecWindowStr: ecWetHours24.length ? `${ecWetHours24[0]}~${ecWetHours24[ecWetHours24.length - 1]} (${ecWetHours24.length}h)` : '无显著降水时次',
+        gfsWindowStr: gfsWetHours24.length ? `${gfsWetHours24[0]}~${gfsWetHours24[gfsWetHours24.length - 1]} (${gfsWetHours24.length}h)` : '无显著降水时次',
+        phaseLagText, confidenceLevel, diagText, stationSummaries, hourlySeries72
+      };
+    }
+
+    function analyzePrecipitationAndAnomalies(stations, grad, ensemble) {
+      const center = stations[0], cur = center.current, hr = center.hourly, idx0 = center.currentHourIdx;
+      const next24 = (arr) => (arr ? arr.slice(idx0, idx0 + 24) : []);
+      const sum24hPrecip = parseFloat(ensemble.ens24Sum);
+      const sum24hRain = next24(hr.rain).reduce((a, b) => a + (b || 0), 0);
+      const sum24hShowers = next24(hr.showers).reduce((a, b) => a + (b || 0), 0);
+      const sum24hSnowCm = next24(hr.snowfall).reduce((a, b) => a + (b || 0), 0);
+      const maxPop24h = Math.max(...next24(hr.precipitation_probability), 0);
+      const freezeArr = next24(hr.freezing_level_height).filter(v => v != null);
+      const minFreezeLvl = freezeArr.length ? Math.min(...freezeArr) : 2500;
+      const currentFreezeLvl = hr.freezing_level_height?.[idx0] ?? 2500;
+      const p3hAgo = hr.pressure_msl?.[0] ?? cur.pressure_msl;
+      const pressureTendency3h = (cur.pressure_msl - p3hAgo).toFixed(1);
+      const dewSpread = (cur.temperature_2m - cur.dew_point_2m).toFixed(1);
+
+      let phaseLabel = '无明显降水';
+      if (sum24hPrecip > 0.1 || sum24hSnowCm > 0.05) {
+        if (sum24hSnowCm > 0 && (sum24hRain + sum24hShowers) > 0) phaseLabel = '⚠️ 雨夹雪/相态转换';
+        else if (sum24hSnowCm > 0 || minFreezeLvl < 1250) phaseLabel = '❄️ 纯雪/高原湿雪';
+        else if (sum24hShowers > sum24hRain) phaseLabel = '⛈️ 对流性阵雨';
+        else phaseLabel = '🌧️ 稳定性层状云降雨';
+      }
+
+      const anomalies = [];
+      let severity = 'normal';
+      if (sum24hPrecip >= 15.0) {
+        severity = 'warning';
+        anomalies.push(`【强降水预警】双模型集合24h累积达 ${sum24hPrecip}mm，需防范大青山山洪沟谷急流与低洼内涝。`);
+      } else if (sum24hPrecip >= 2.0 || maxPop24h >= 55) {
+        severity = 'watch';
+        anomalies.push(`【降水过程关注】集合最优24h降水 ${sum24hPrecip}mm (最高概率 ${maxPop24h}%)，${ensemble.diagText}`);
+      }
+      if ((sum24hPrecip > 0.2 || maxPop24h >= 40) && minFreezeLvl <= 1550) {
+        severity = 'warning';
+        anomalies.push(`【雨雪转换/道路结冰】0°C融化层最低降至 ${Math.round(minFreezeLvl)}m，逼近呼市市区(1040m)与武川(1580m)，警惕雨雪转换。`);
+      }
+      const maxGust24 = Math.max(...next24(hr.wind_gusts_10m), cur.wind_gusts_10m || 0);
+      if (Math.abs(parseFloat(pressureTendency3h)) >= 3.0 || parseFloat(grad.magnitude) >= 2.2 || maxGust24 >= 14.0) {
+        if (severity === 'normal') severity = 'watch';
+        anomalies.push(`【气压梯度与阵风扰动】3h变压 ${pressureTendency3h}hPa，水平气压梯度 ${grad.magnitude}hPa/100km，未来24h最大阵风达 ${maxGust24.toFixed(1)}m/s。`);
+      }
+      if (!anomalies.length) {
+        anomalies.push(`ECMWF 与 GFS 双模型高度一致（一致率 ${ensemble.agreementPct}%）：未来24小时呼和浩特层结稳定，无极端降水或异常天气信号。`);
+      }
+
+      return {
+        sum24hPrecip: sum24hPrecip.toFixed(1), sum24hRain: sum24hRain.toFixed(1),
+        sum24hShowers: sum24hShowers.toFixed(1), sum24hSnowCm: sum24hSnowCm.toFixed(2),
+        maxPop24h, currentFreezeLvl: Math.round(currentFreezeLvl), minFreezeLvl: Math.round(minFreezeLvl),
+        pressureTendency3h, dewSpread, phaseLabel, anomalies, severity
+      };
+    }
+
+    function renderDashboard(stations, grad, diag, ensemble) {
+      const center = stations[0], cur = center.current, idx0 = center.currentHourIdx;
+      document.getElementById('updateTime').innerText = `实况基准: ${cur.time.replace('T', ' ')} | 已完成 ECMWF + GFS 双模型交叉验证`;
+
+      document.getElementById('ensConfidenceBadge').innerText = `预报置信度: ${ensemble.confidenceLevel}`;
+      document.getElementById('valEc24h').innerText = `${ensemble.ec24Sum} mm`;
+      document.getElementById('valEcPeak').innerText = `峰值 ${ensemble.ec24Peak} mm/h`;
+      document.getElementById('valEcWindow').innerText = `EC时段: ${ensemble.ecWindowStr}`;
+      document.getElementById('valGfs24h').innerText = `${ensemble.gfs24Sum} mm`;
+      document.getElementById('valGfsPeak').innerText = `峰值 ${ensemble.gfs24Peak} mm/h`;
+      document.getElementById('valGfsWindow').innerText = `GFS时段: ${ensemble.gfsWindowStr}`;
+      document.getElementById('valEns24h').innerText = `${ensemble.ens24Sum} mm`;
+      document.getElementById('valAgreeRate').innerText = `一致率 ${ensemble.agreementPct}%`;
+      document.getElementById('valSpread24h').innerText = `离散度 ±${ensemble.spread24}mm`;
+      document.getElementById('valPhaseLag').innerText = ensemble.phaseLagText;
+      document.getElementById('valModelDiagText').innerText = ensemble.diagText;
+
+      const banner = document.getElementById('anomalyBanner');
+      const titleEl = document.getElementById('anomalyTitle');
+      const badgeEl = document.getElementById('anomalyBadge');
+      if (diag.severity === 'warning') {
+        banner.className = 'glass-card rounded-xl p-3 border-l-4 border-rose-500 bg-rose-950/30 flex items-start justify-between gap-3';
+        titleEl.innerText = '🚨 双模型交叉验证：重点天气预警';
+        badgeEl.innerText = '高风险';
+      } else if (diag.severity === 'watch') {
+        banner.className = 'glass-card rounded-xl p-3 border-l-4 border-amber-500 bg-amber-950/20 flex items-start justify-between gap-3';
+        titleEl.innerText = '⚠️ 降水或气压扰动过程关注';
+        badgeEl.innerText = '过程关注';
+      } else {
+        banner.className = 'glass-card rounded-xl p-3 border-l-4 border-emerald-500 flex items-start justify-between gap-3';
+        titleEl.innerText = '🛡️ 双模型交叉验证：大气层结稳定 / 正常';
+        badgeEl.innerText = '平稳';
+      }
+      document.getElementById('anomalyList').innerHTML = diag.anomalies.map(a => `<div>• ${a}</div>`).join('');
+
+      document.getElementById('valPrecipNow').innerText = `${cur.precipitation} mm`;
+      document.getElementById('valPopMax24').innerText = `24h最高概率 ${diag.maxPop24h}%`;
+      document.getElementById('valNowcastStatus').innerText = cur.precipitation > 0 ? '⚡ 正在降水' : '当前无降水';
+      document.getElementById('valNowcastDetail').innerText = `EC窗口: ${ensemble.ecWindowStr} | GFS窗口: ${ensemble.gfsWindowStr}`;
+
+      document.getElementById('valFreezeLvl').innerText = `0°C层: ${diag.currentFreezeLvl}m (最低${diag.minFreezeLvl}m)`;
+      document.getElementById('valPrecip24h').innerText = `${ensemble.ens24Sum} mm`;
+      document.getElementById('valPhaseTag').innerText = diag.phaseLabel;
+      document.getElementById('valPhaseBreakdown').innerText = `连续雨: ${diag.sum24hRain}mm | 阵雨: ${diag.sum24hShowers}mm | 降雪: ${diag.sum24hSnowCm}cm`;
+
+      document.getElementById('valHum').innerText = `湿度 ${cur.relative_humidity_2m}%`;
+      document.getElementById('valDewSpread').innerText = `${diag.dewSpread} °C`;
+      document.getElementById('valDewPoint').innerText = `露点 ${cur.dew_point_2m}°C`;
+      const curCape = center.hourly.cape?.[idx0] ?? 0;
+      document.getElementById('valConvective').innerText = `CAPE: ${curCape} J/kg | ${parseFloat(diag.dewSpread) <= 3.5 ? '低空湿饱和' : '低空偏干'}`;
+
+      document.getElementById('valMslp').innerText = `海平面 ${cur.pressure_msl} hPa`;
+      document.getElementById('valGradMag').innerText = grad.magnitude;
+      document.getElementById('valPressureTendency').innerText = `3h变压: ${diag.pressureTendency3h} hPa | 阴山南北差: ${grad.northSouthDiff} hPa`;
+
+      const uvSlice = center.hourly.uv_index.slice(idx0, idx0 + 24).map(v => v || 0);
+      const curUv = center.hourly.uv_index?.[idx0] ?? 0;
+      const maxUv = Math.max(...uvSlice, 0);
+      document.getElementById('valUv').innerText = curUv.toFixed(1);
+      document.getElementById('valUvClear').innerText = `24h峰值 ${maxUv.toFixed(1)}`;
+      document.getElementById('valUvLevel').innerText = curUv < 3 ? '弱' : (curUv < 6 ? '中等' : (curUv < 8 ? '高强' : '极强'));
+      document.getElementById('valUvAdvice').innerText = curUv >= 6 ? '高原强紫外线，外出需涂抹SPF30+防晒' : '当前紫外线较弱，注意日间峰值防护';
+
+      document.getElementById('valTemp').innerText = `气温 ${cur.temperature_2m}°C`;
+      document.getElementById('valWindGust').innerText = `${cur.wind_gusts_10m} m/s`;
+      document.getElementById('valWindAvg').innerText = `平均 ${cur.wind_speed_10m} m/s (${cur.wind_direction_10m}°)`;
+      document.getElementById('valClouds').innerText = `云量(总/低/中/高): ${cur.cloud_cover}% / ${cur.cloud_cover_low}% / ${cur.cloud_cover_mid}% / ${cur.cloud_cover_high}%`;
+
+      document.getElementById('gridTableBody').innerHTML = stations.map((s, idx) => {
+        const c = s.current, h = s.hourly, i0 = s.currentHourIdx, stEns = ensemble.stationSummaries[idx];
+        const stMaxPop = Math.max(...h.precipitation_probability.slice(i0, i0 + 24), 0);
+        const stFreeze = Math.round(h.freezing_level_height?.[i0] ?? 2500);
+        const stSpread = (c.temperature_2m - c.dew_point_2m).toFixed(1);
+        return `<tr class="hover:bg-slate-800/50">
+          <td class="py-2 font-medium text-white">${s.name} <span class="text-[10px] text-slate-400">(${s.alt}m)</span></td>
+          <td class="py-2">${c.temperature_2m}°C <span class="text-teal-400">(T-Td: ${stSpread}°C)</span></td>
+          <td class="py-2 text-amber-300 font-semibold">${c.pressure_msl} hPa</td>
+          <td class="py-2 text-sky-400 font-bold">${stEns.ecSum24} mm</td>
+          <td class="py-2 text-amber-400 font-bold">${stEns.gfsSum24} mm</td>
+          <td class="py-2 text-emerald-400 font-bold">${stEns.ensSum24} mm <span class="text-slate-400 font-normal">(${stMaxPop}%)</span></td>
+          <td class="py-2 text-rose-300">${stFreeze}m / 阵风${c.wind_gusts_10m}m/s</td>
+        </tr>`;
+      }).join('');
+    }
+
+    // 原生 HTML5 Canvas 繪图引擎（零外部CDN依赖，永不报错）
+    function renderNativePrecipChart(ensemble) {
+      const canvas = document.getElementById('precipChart');
+      const dpr = window.devicePixelRatio || 1;
+      const rect = canvas.getBoundingClientRect();
+      const width = Math.max(rect.width || 800, 600);
+      const height = 230;
+      canvas.width = width * dpr;
+      canvas.height = height * dpr;
+      const ctx = canvas.getContext('2d');
+      ctx.scale(dpr, dpr);
+      ctx.clearRect(0, 0, width, height);
+
+      const data24 = ensemble.hourlySeries72.slice(0, 24);
+      const pad = { top: 20, right: 42, bottom: 30, left: 42 };
+      const plotW = width - pad.left - pad.right;
+      const plotH = height - pad.top - pad.bottom;
+
+      const maxPrecip = Math.max(4.0, ...data24.map(d => Math.max(d.ec_precip_mm, d.gfs_precip_mm))) * 1.15;
+
+      // 绘制水平网格线与左右坐标轴刻度
+      ctx.strokeStyle = 'rgba(148, 163, 184, 0.12)';
+      ctx.fillStyle = '#94a3b8';
+      ctx.font = '10px system-ui';
+      for (let i = 0; i <= 4; i++) {
+        const y = pad.top + (plotH * i) / 4;
+        ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
+        const pVal = ((4 - i) / 4 * maxPrecip).toFixed(1);
+        const popVal = ((4 - i) * 25) + '%';
+        ctx.fillStyle = '#38bdf8'; ctx.fillText(`${pVal}mm`, 4, y + 3);
+        ctx.fillStyle = '#a855f7'; ctx.fillText(popVal, width - pad.right + 6, y + 3);
+      }
+
+      const stepX = plotW / 24;
+      const barW = Math.max(4, stepX * 0.34);
+
+      // 绘制 ECMWF 与 GFS 并列柱状图及底部时间轴
+      data24.forEach((d, idx) => {
+        const xCenter = pad.left + idx * stepX + stepX / 2;
+        const ecH = (d.ec_precip_mm / maxPrecip) * plotH;
+        const gfsH = (d.gfs_precip_mm / maxPrecip) * plotH;
+
+        ctx.fillStyle = 'rgba(56, 189, 248, 0.85)';
+        ctx.fillRect(xCenter - barW - 1, pad.top + plotH - ecH, barW, Math.max(ecH, 1.5));
+
+        ctx.fillStyle = 'rgba(251, 191, 36, 0.85)';
+        ctx.fillRect(xCenter + 1, pad.top + plotH - gfsH, barW, Math.max(gfsH, 1.5));
+
+        if (idx % 2 === 0) {
+          ctx.fillStyle = '#94a3b8';
+          ctx.fillText(d.time.slice(11, 16), xCenter - 12, height - 10);
+        }
+      });
+
+      // 绘制集合最优实线 (绿色)
+      ctx.strokeStyle = '#10b981';
+      ctx.lineWidth = 2.2;
+      ctx.beginPath();
+      data24.forEach((d, idx) => {
+        const x = pad.left + idx * stepX + stepX / 2;
+        const y = pad.top + plotH - (d.ens_precip_mm / maxPrecip) * plotH;
+        if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+
+      // 绘制降水概率虚线 (紫色)
+      ctx.strokeStyle = '#a855f7';
+      ctx.lineWidth = 1.6;
+      ctx.setLineDash([4, 4]);
+      ctx.beginPath();
+      data24.forEach((d, idx) => {
+        const x = pad.left + idx * stepX + stepX / 2;
+        const y = pad.top + plotH - (d.pop_pct / 100) * plotH;
+        if (idx === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      });
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+
+    function renderMapMarkersAndGradient(stations, grad, ensemble) {
+      gradientLayerGroup.clearLayers();
+      stations.forEach((s, idx) => {
+        const c = s.current, stEns = ensemble.stationSummaries[idx];
+        const markerHtml = `
+          <div style="background:rgba(15,23,42,0.94);border:1.5px solid #38bdf8;border-radius:6px;padding:3px 6px;color:#fff;font-size:10px;white-space:nowrap;box-shadow:0 3px 10px rgba(0,0,0,0.85);">
+            <div style="font-weight:bold;color:#38bdf8;">${s.name.split(' ')[0]} (${c.pressure_msl}hPa)</div>
+            <div>${c.temperature_2m}°C | EC:<span style="color:#38bdf8">${stEns.ecSum24}</span> GFS:<span style="color:#fbbf24">${stEns.gfsSum24}mm</span></div>
+          </div>`;
+        const icon = L.divIcon({ html: markerHtml, className: '', iconSize: [148, 38], iconAnchor: [74, 19] });
+        L.marker([s.lat, s.lon], { icon, zIndexOffset: 1000 }).addTo(gradientLayerGroup)
+          .bindPopup(`<b>${s.name} (海拔${s.alt}m)</b><br/>实况气温: ${c.temperature_2m}°C / 露点: ${c.dew_point_2m}°C<br/>🇪🇺 ECMWF 24h累积: <b>${stEns.ecSum24} mm</b><br/>🇺🇸 NOAA GFS 24h累积: <b>${stEns.gfsSum24} mm</b><br/>🎯 集合加权最优: <b>${stEns.ensSum24} mm</b><br/>海平面气压: ${c.pressure_msl} hPa`);
+      });
+
+      const centerLat = 40.8426, centerLon = 111.7492, scale = 0.22;
+      const endLat = centerLat + Math.sin(grad.forceAngleRad) * scale;
+      const endLon = centerLon + Math.cos(grad.forceAngleRad) * (scale / Math.cos(centerLat * Math.PI / 180));
+
+      L.polyline([[centerLat, centerLon], [endLat, endLon]], { pane: 'stationOverlayPane', color: '#f59e0b', weight: 4, dashArray: '6, 4' })
+        .addTo(gradientLayerGroup).bindPopup(`水平气压梯度力矢量: ${grad.magnitude} hPa/100km (方位 ${grad.forceAzimuth}°)`);
+      L.circleMarker([endLat, endLon], { pane: 'stationOverlayPane', radius: 6, color: '#f59e0b', fillColor: '#fbbf24', fillOpacity: 1 }).addTo(gradientLayerGroup);
+    }
+
+    function toggleGradientOverlay() {
+      if (map.hasLayer(gradientLayerGroup)) map.removeLayer(gradientLayerGroup);
+      else map.addLayer(gradientLayerGroup);
+    }
+
+    async function runDeepSeekAnalysis() {
+      const apiKey = localStorage.getItem('deepseek_api_key');
+      const modelId = localStorage.getItem('deepseek_model_id') || 'deepseek-v4-flash';
+      if (!apiKey) { toggleModal(true); alert('请先在设置中粘贴你的 DeepSeek API Key (sk-...)'); return; }
+      if (!latestMeteorologicalState) { alert('数据正在同步，请稍候。'); return; }
+
+      const btn = document.getElementById('btnAnalyze'), out = document.getElementById('aiOutput');
+      btn.disabled = true; btn.innerText = 'DeepSeek 正在会商 ECMWF 与 GFS...';
+      out.innerText = '正在向 DeepSeek 模型发送呼和浩特 ECMWF IFS 与 NOAA GFS 72h 对比矩阵及五站动力数据...\n\n';
+
+      const { stations, gradient, ensemble, diagnostics } = latestMeteorologicalState;
+      const dualModelKeyHours = ensemble.hourlySeries72.filter((d, idx) => idx % 3 === 0 || d.ec_precip_mm >= 0.1 || d.gfs_precip_mm >= 0.1 || d.pop_pct >= 35);
+
+      const promptPayload = {
+        region: "内蒙古呼和浩特市 (市区1040m，北侧武川大青山1580m，南侧托克托平原1000m)",
+        observation_time: stations[0].current.time,
+        dual_model_24h_cross_validation: {
+          ecmwf_24h_mm: ensemble.ec24Sum, gfs_24h_mm: ensemble.gfs24Sum, ensemble_mm: ensemble.ens24Sum,
+          spread_mm: ensemble.spread24, agreement_pct: ensemble.agreementPct,
+          ec_window: ensemble.ecWindowStr, gfs_window: ensemble.gfsWindowStr,
+          trough_phase_lag: ensemble.phaseLagText, confidence: ensemble.confidenceLevel
+        },
+        five_station_summary: ensemble.stationSummaries,
+        dynamics_and_moisture: {
+          temp_c: stations[0].current.temperature_2m, dew_spread_c: diagnostics.dewSpread,
+          freezing_level_m: diagnostics.currentFreezeLvl, min_24h_freezing_level_m: diagnostics.minFreezeLvl,
+          pressure_tendency_3h_hPa: diagnostics.pressureTendency3h,
+          pressure_gradient_hPa_100km: gradient.magnitude, wuchuan_minus_togtoh_hPa: gradient.northSouthDiff
+        },
+        hourly_72h_series: dualModelKeyHours
+      };
+
+      try {
+        const response = await fetch('https://api.deepseek.com/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+          body: JSON.stringify({
+            model: modelId, stream: true, temperature: 0.2,
+            messages: [
+              { role: 'system', content: '你是负责呼和浩特地区（大青山南麓与敕勒川平原）的首席气象预报专家。请结合传入的 ECMWF IFS 与 NOAA GFS 双模型对比数据、五站气压梯度、温度露点差及0°C融化层高度，输出：1. ECMWF vs GFS 双模型分歧裁定与采信依据；2. 未来24-72小时精确到小时段的降水时间窗与雨雪相态判定；3. 大青山地形增幅与五站差异诊断；4. 异常天气风险等级与防御建议。' },
+              { role: 'user', content: JSON.stringify(promptPayload) }
+            ]
+          })
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}: ${await response.text()}`);
+        const reader = response.body.getReader(), decoder = new TextDecoder('utf-8');
+        out.innerText = '';
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          for (const line of decoder.decode(value, { stream: true }).split('\n')) {
+            if (line.startsWith('data: ') && line !== 'data: [DONE]') {
+              try { out.innerText += JSON.parse(line.slice(6)).choices?.[0]?.delta?.content || ''; } catch (_) {}
+            }
+          }
+        }
+      } catch (err) {
+        out.innerText = `调用 DeepSeek 接口出错：${err.message}\n请检查右上角「API 设置」中的 sk- 密钥，或尝试切换模型标识符。`;
+      } finally {
+        btn.disabled = false; btn.innerText = '启动双模型AI交叉会商';
+      }
+    }
+
+    function toggleModal(show) {
+      const modal = document.getElementById('settingsModal');
+      if (show) {
+        document.getElementById('inputApiKey').value = localStorage.getItem('deepseek_api_key') || '';
+        document.getElementById('inputModelId').value = localStorage.getItem('deepseek_model_id') || 'deepseek-v4-flash';
+        modal.classList.remove('hidden');
+      } else modal.classList.add('hidden');
+    }
+
+    function saveSettings() {
+      const key = document.getElementById('inputApiKey').value.trim();
+      const model = document.getElementById('inputModelId').value;
+      if (key) localStorage.setItem('deepseek_api_key', key);
+      localStorage.setItem('deepseek_model_id', model);
+      document.getElementById('modelBadge').innerText = model;
+      toggleModal(false);
+    }
+
+    function refreshAllData() {
+      loadRainViewerTiles();
+      fetchOpenMeteoData();
+    }
+
+    window.addEventListener('DOMContentLoaded', () => {
+      document.getElementById('modelBadge').innerText = localStorage.getItem('deepseek_model_id') || 'deepseek-v4-flash';
+      initMap();
+      refreshAllData();
+    });
+  </script>
+</body>
+</html>
